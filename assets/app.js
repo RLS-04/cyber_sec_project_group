@@ -231,7 +231,7 @@ const DataStore = {
 
 const SheetsAPI = {
     isConfigured() {
-        return CONFIG.API_URL && CONFIG.API_URL !== 'YOUR_GOOGLE_APPS_SCRIPT_URL_HERE';
+        return CONFIG.API_URL && CONFIG.API_URL !== 'https://script.google.com/macros/s/AKfycbwqtMembGr0N-BJpEprQ6PKu7dNqNSsVyy87yQ3VWivzXr8r9nbRdf-JnVL9syGHnwP/exec';
     },
 
     async submitTask(task) {
