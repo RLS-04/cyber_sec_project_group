@@ -1,6 +1,6 @@
 /* ========================================
    SECURE TASK MANAGER - MAIN APPLICATION
-   BUG-FIXED VERSION
+   CROSS-DEVICE SYNC FIXED VERSION
    ======================================== */
 
 // ========================================
@@ -12,9 +12,9 @@ const CONFIG = {
 
     // LocalStorage keys
     STORAGE_KEY: 'taskhub_session',
-    USERS_KEY: 'taskhub_users',
     TASKS_KEY: 'taskhub_tasks',
     PENDING_KEY: 'taskhub_pending',
+    LAST_SYNC_KEY: 'taskhub_last_sync',
 
     // Validation
     MIN_PASSWORD_LENGTH: 8,
@@ -115,43 +115,6 @@ async function withRetry(fn, maxRetries = CONFIG.MAX_RETRIES, delay = CONFIG.RET
 // ========================================
 
 const DataStore = {
-    getUsers() {
-        try {
-            return JSON.parse(localStorage.getItem(CONFIG.USERS_KEY)) || {};
-        } catch {
-            return {};
-        }
-    },
-
-    saveUsers(users) {
-        localStorage.setItem(CONFIG.USERS_KEY, JSON.stringify(users));
-    },
-
-    getUser(username) {
-        const users = this.getUsers();
-        return users[username.toLowerCase()];
-    },
-
-    async addUser(username, password) {
-        const users = this.getUsers();
-        const key = username.toLowerCase();
-        if (users[key]) return false;
-        users[key] = {
-            username: username,
-            passwordHash: await hashPassword(password),
-            createdAt: new Date().toISOString()
-        };
-        this.saveUsers(users);
-        return true;
-    },
-
-    async validateUser(username, password) {
-        const user = this.getUser(username);
-        if (!user) return false;
-        const hash = await hashPassword(password);
-        return user.passwordHash === hash;
-    },
-
     getTasks() {
         try {
             return JSON.parse(localStorage.getItem(CONFIG.TASKS_KEY)) || [];
@@ -171,6 +134,15 @@ const DataStore = {
         return tasks;
     },
 
+    updateTaskSyncStatus(taskId, synced) {
+        const tasks = this.getTasks();
+        const idx = tasks.findIndex(t => t.id === taskId);
+        if (idx !== -1) {
+            tasks[idx].synced = synced;
+            this.saveTasks(tasks);
+        }
+    },
+
     getPendingTasks() {
         try {
             return JSON.parse(localStorage.getItem(CONFIG.PENDING_KEY)) || [];
@@ -185,8 +157,11 @@ const DataStore = {
 
     addPendingTask(task) {
         const pending = this.getPendingTasks();
-        pending.push(task);
-        this.savePendingTasks(pending);
+        // Avoid duplicates
+        if (!pending.find(t => t.id === task.id)) {
+            pending.push(task);
+            this.savePendingTasks(pending);
+        }
     },
 
     removePendingTask(taskId) {
@@ -219,9 +194,18 @@ const DataStore = {
         sessionStorage.removeItem(CONFIG.STORAGE_KEY);
     },
 
+    getLastSync() {
+        return localStorage.getItem(CONFIG.LAST_SYNC_KEY) || '0';
+    },
+
+    setLastSync(timestamp) {
+        localStorage.setItem(CONFIG.LAST_SYNC_KEY, timestamp);
+    },
+
     getAllUsernames() {
-        const users = this.getUsers();
-        return Object.keys(users);
+        const tasks = this.getTasks();
+        const usernames = [...new Set(tasks.map(t => t.username))];
+        return usernames;
     }
 };
 
@@ -231,60 +215,62 @@ const DataStore = {
 
 const SheetsAPI = {
     isConfigured() {
-        return CONFIG.API_URL && CONFIG.API_URL.length > 50;
+        return CONFIG.API_URL && CONFIG.API_URL.length > 50 && !CONFIG.API_URL.includes('YOUR_');
     },
 
-    async submitTask(task) {
+    async apiCall(action, data = null) {
         if (!this.isConfigured()) {
-            return { success: true, local: true };
+            return { success: false, error: 'API not configured', local: true };
+        }
+
+        const url = new URL(CONFIG.API_URL);
+        url.searchParams.set('action', action);
+
+        const options = {
+            method: data ? 'POST' : 'GET',
+            redirect: 'follow',
+            headers: {}
+        };
+
+        if (data) {
+            // Use text/plain to avoid CORS preflight with Google Apps Script
+            options.headers['Content-Type'] = 'text/plain;charset=utf-8';
+            options.body = JSON.stringify({ action, data });
         }
 
         return await withRetry(async () => {
-            const response = await fetch(CONFIG.API_URL, {
-                method: 'POST',
-                headers: { 'Content-Type': 'text/plain;charset=utf-8' },
-                body: JSON.stringify({
-                    action: 'submitTask',
-                    data: task
-                }),
-                redirect: 'follow'
-            });
-
+            const response = await fetch(url.toString(), options);
             if (!response.ok) throw new Error(`HTTP ${response.status}`);
-            return await response.json();
+            const result = await response.json();
+            return result;
         });
     },
 
-    async fetchTasks() {
-        if (!this.isConfigured()) return null;
-
-        return await withRetry(async () => {
-            const response = await fetch(`${CONFIG.API_URL}?action=getTasks`, {
-                method: 'GET',
-                redirect: 'follow'
-            });
-            if (!response.ok) throw new Error(`HTTP ${response.status}`);
-            return await response.json();
-        });
+    // === USER AUTH (NEW) ===
+    async registerUser(username, passwordHash) {
+        return await this.apiCall('registerUser', { username, passwordHash });
     },
 
+    async loginUser(username, passwordHash) {
+        return await this.apiCall('loginUser', { username, passwordHash });
+    },
+
+    async fetchUsers() {
+        return await this.apiCall('getUsers');
+    },
+
+    // === TASKS ===
+    async submitTask(task) {
+        return await this.apiCall('submitTask', task);
+    },
+
+    async fetchTasks(since = '0') {
+        return await this.apiCall('getTasks', { since });
+    },
+
+    // === IMAGES ===
     async uploadImage(base64Image, filename) {
-        if (!this.isConfigured()) return null;
-
-        return await withRetry(async () => {
-            const response = await fetch(CONFIG.API_URL, {
-                method: 'POST',
-                headers: { 'Content-Type': 'text/plain;charset=utf-8' },
-                body: JSON.stringify({
-                    action: 'uploadImage',
-                    image: base64Image,
-                    filename: filename
-                }),
-                redirect: 'follow'
-            });
-            if (!response.ok) throw new Error(`HTTP ${response.status}`);
-            return await response.json();
-        });
+        return await this.apiCall('uploadImage', { image: base64Image, filename });
     }
 };
 
@@ -392,7 +378,7 @@ const UI = {
 };
 
 // ========================================
-// AUTHENTICATION
+// AUTHENTICATION (CLOUD-FIRST)
 // ========================================
 
 async function handleLogin(e) {
@@ -412,16 +398,34 @@ async function handleLogin(e) {
     setLoading(true);
 
     try {
-        const valid = await DataStore.validateUser(username, password);
-        if (!valid) {
-            UI.setFieldError('login-password', 'Invalid username or password');
-            showToast('error', 'Login Failed', 'Invalid username or password');
-            return;
+        const passwordHash = await hashPassword(password);
+        let cloudValid = false;
+
+        // Try cloud auth first if configured
+        if (SheetsAPI.isConfigured()) {
+            try {
+                const result = await SheetsAPI.loginUser(username, passwordHash);
+                if (result && result.success) {
+                    cloudValid = true;
+                    console.log('Cloud login successful');
+                }
+            } catch (err) {
+                console.warn('Cloud login failed, falling back to local:', err.message);
+            }
         }
 
-        DataStore.setSession(username);
-        showToast('success', 'Welcome Back!', `Logged in as ${username}`);
-        enterDashboard(username);
+        // Fallback: check local tasks for this username (legacy support)
+        const localTasks = DataStore.getTasks();
+        const hasLocalData = localTasks.some(t => t.username.toLowerCase() === username.toLowerCase());
+
+        if (cloudValid || hasLocalData) {
+            DataStore.setSession(username);
+            showToast('success', 'Welcome Back!', `Logged in as ${username}`);
+            await enterDashboard(username);
+        } else {
+            UI.setFieldError('login-password', 'Invalid username or password');
+            showToast('error', 'Login Failed', 'Invalid username or password');
+        }
 
     } catch (err) {
         console.error('Login error:', err);
@@ -455,16 +459,40 @@ async function handleRegister(e) {
     setLoading(true);
 
     try {
-        const added = await DataStore.addUser(username, password);
-        if (!added) {
-            UI.setFieldError('reg-username', 'Username already exists');
-            showToast('warning', 'Registration Failed', 'Username already taken');
-            return;
+        const passwordHash = await hashPassword(password);
+        let registered = false;
+
+        // Try cloud registration first
+        if (SheetsAPI.isConfigured()) {
+            try {
+                const result = await SheetsAPI.registerUser(username, passwordHash);
+                if (result && result.success) {
+                    registered = true;
+                    console.log('Cloud registration successful');
+                } else if (result && result.error === 'Username already exists') {
+                    UI.setFieldError('reg-username', 'Username already exists');
+                    showToast('warning', 'Registration Failed', 'Username already taken');
+                    setLoading(false);
+                    return;
+                }
+            } catch (err) {
+                console.warn('Cloud registration failed, using local:', err.message);
+            }
         }
 
-        DataStore.setSession(username);
-        showToast('success', 'Account Created!', `Welcome, ${username}!`);
-        enterDashboard(username);
+        // If cloud failed or not configured, we still allow local-only use
+        // (user can register again on other devices, but tasks won't sync)
+        if (!registered && !SheetsAPI.isConfigured()) {
+            registered = true; // Local-only mode
+        }
+
+        if (registered) {
+            DataStore.setSession(username);
+            showToast('success', 'Account Created!', `Welcome, ${username}!`);
+            await enterDashboard(username);
+        } else {
+            showToast('error', 'Registration Failed', 'Could not create account. Please check your connection.');
+        }
 
     } catch (err) {
         console.error('Registration error:', err);
@@ -486,41 +514,119 @@ async function enterDashboard(username) {
     UI.showView('dashboard-view');
     UI.showTab('upload');
 
+    // Always sync with cloud on dashboard entry
     if (SheetsAPI.isConfigured()) {
         try {
             setLoading(true);
-            const result = await SheetsAPI.fetchTasks();
-            if (result && result.success && result.tasks) {
-                const localTasks = DataStore.getTasks();
-                const cloudTasks = result.tasks;
-                const merged = mergeTasks(localTasks, cloudTasks);
-                DataStore.saveTasks(merged);
-                showToast('success', 'Synced', `Loaded ${cloudTasks.length} tasks from cloud`);
-            }
+            await syncWithCloud();
         } catch (err) {
-            console.warn('Could not fetch cloud tasks:', err);
+            console.warn('Could not sync with cloud:', err);
             showToast('warning', 'Offline Mode', 'Using local data only');
         } finally {
             setLoading(false);
         }
     }
 
+    // Always try to sync any pending tasks
+    await syncPendingTasks();
+
     refreshAllData();
+}
+
+// ========================================
+// CLOUD SYNC (NEW - ROBUST)
+// ========================================
+
+async function syncWithCloud() {
+    if (!SheetsAPI.isConfigured()) return;
+
+    const lastSync = DataStore.getLastSync();
+
+    // 1. Fetch new/updated tasks from cloud
+    const result = await SheetsAPI.fetchTasks(lastSync);
+    if (result && result.success && result.tasks) {
+        const localTasks = DataStore.getTasks();
+        const cloudTasks = result.tasks;
+
+        // Merge: cloud wins on conflict, then sort by date desc
+        const merged = mergeTasks(localTasks, cloudTasks);
+        DataStore.saveTasks(merged);
+
+        if (cloudTasks.length > 0) {
+            showToast('success', 'Synced', `Loaded ${cloudTasks.length} task(s) from cloud`);
+        }
+    }
+
+    // 2. Push any unsynced local tasks to cloud
+    const localTasks = DataStore.getTasks();
+    const unsynced = localTasks.filter(t => !t.synced);
+
+    if (unsynced.length > 0) {
+        showToast('info', 'Uploading', `Syncing ${unsynced.length} local task(s)...`);
+        let successCount = 0;
+
+        for (const task of unsynced) {
+            try {
+                // If task has a base64 image, we need to re-upload it
+                let taskToSync = { ...task };
+
+                if (task.screenshot && task.screenshot.startsWith('data:image')) {
+                    // Re-upload image to get a URL
+                    const uploadResult = await SheetsAPI.uploadImage(
+                        task.screenshot,
+                        `task_${task.username}_${task.id}.jpg`
+                    );
+                    if (uploadResult && uploadResult.success && uploadResult.url) {
+                        taskToSync.screenshot = uploadResult.url;
+                    }
+                }
+
+                const submitResult = await SheetsAPI.submitTask(taskToSync);
+                if (submitResult && submitResult.success) {
+                    DataStore.updateTaskSyncStatus(task.id, true);
+                    DataStore.removePendingTask(task.id);
+                    successCount++;
+                }
+            } catch (err) {
+                console.warn('Failed to sync task:', task.id, err);
+                DataStore.addPendingTask(task);
+            }
+        }
+
+        if (successCount > 0) {
+            showToast('success', 'Sync Complete', `${successCount} task(s) uploaded to cloud`);
+        }
+    }
+
+    DataStore.setLastSync(new Date().toISOString());
 }
 
 function mergeTasks(local, cloud) {
     const map = new Map();
-    [...local, ...cloud].forEach(task => {
+
+    // Add all local tasks first
+    local.forEach(task => map.set(task.id, task));
+
+    // Override with cloud tasks (cloud is source of truth)
+    cloud.forEach(task => {
         const existing = map.get(task.id);
-        if (!existing || new Date(task.date) > new Date(existing.date)) {
-            map.set(task.id, task);
+        if (!existing) {
+            map.set(task.id, { ...task, synced: true });
+        } else {
+            // Cloud wins - but preserve local screenshot if cloud has none
+            const merged = { ...task, synced: true };
+            if (!merged.screenshot && existing.screenshot) {
+                merged.screenshot = existing.screenshot;
+            }
+            map.set(task.id, merged);
         }
     });
+
     return Array.from(map.values()).sort((a, b) => new Date(b.date) - new Date(a.date));
 }
 
 // ========================================
-// TASK UPLOAD
+// TASK UPLOAD (FIXED)
 // ========================================
 
 let currentFile = null;
@@ -617,70 +723,62 @@ async function handleTaskUpload(e) {
 
     setLoading(true);
 
-    let screenshotUrl = null;
-    let cloudUploadSuccess = false;
-
     try {
+        // 1. Compress image
         const base64Original = await fileToBase64(currentFile);
         const base64Compressed = await compressImage(base64Original);
 
-        if (SheetsAPI.isConfigured()) {
-            try {
-                const uploadResult = await SheetsAPI.uploadImage(
-                    base64Compressed,
-                    `task_${session.username}_${Date.now()}.jpg`
-                );
-                if (uploadResult && uploadResult.success && uploadResult.url) {
-                    screenshotUrl = uploadResult.url;
-                    cloudUploadSuccess = true;
-                } else {
-                    screenshotUrl = base64Compressed;
-                }
-            } catch (err) {
-                screenshotUrl = base64Compressed;
-                console.warn('Image upload to cloud failed, using base64:', err);
-            }
-        } else {
-            screenshotUrl = base64Compressed;
-        }
-
+        // 2. Create task object (local-first)
+        const taskId = generateId();
         const task = {
-            id: generateId(),
+            id: taskId,
             date: new Date().toISOString(),
             username: session.username,
             task: taskText,
-            screenshot: screenshotUrl,
+            screenshot: base64Compressed, // Store compressed base64 locally as fallback
             synced: false
         };
 
+        // 3. Save locally IMMEDIATELY (so user sees it even if cloud fails)
         DataStore.addTask(task);
+        DataStore.addPendingTask(task); // Mark for sync
 
+        // 4. Try cloud upload
         if (SheetsAPI.isConfigured()) {
             try {
+                // Upload image first
+                const uploadResult = await SheetsAPI.uploadImage(
+                    base64Compressed,
+                    `task_${session.username}_${taskId}.jpg`
+                );
+
+                let screenshotUrl = base64Compressed;
+                if (uploadResult && uploadResult.success && uploadResult.url) {
+                    screenshotUrl = uploadResult.url;
+                }
+
+                // Update task with cloud URL
+                task.screenshot = screenshotUrl;
+
+                // Submit task to cloud
                 const result = await SheetsAPI.submitTask(task);
                 if (result && result.success) {
-                    task.synced = true;
-                    const tasks = DataStore.getTasks();
-                    const idx = tasks.findIndex(t => t.id === task.id);
-                    if (idx !== -1) {
-                        tasks[idx].synced = true;
-                        DataStore.saveTasks(tasks);
-                    }
+                    // Mark as synced in local storage
+                    DataStore.updateTaskSyncStatus(taskId, true);
+                    DataStore.removePendingTask(taskId);
                     showToast('success', 'Task Uploaded', 'Your task has been saved and synced to the cloud!');
-                    DataStore.removePendingTask(task.id);
                 } else {
                     throw new Error(result.error || 'Unknown server error');
                 }
             } catch (err) {
                 console.error('Cloud sync failed:', err);
-                task.synced = false;
-                DataStore.addPendingTask(task);
-                showToast('warning', 'Saved Locally', 'Cloud sync failed. Task queued for later sync. Error: ' + err.message);
+                showToast('warning', 'Saved Locally', 'Cloud sync failed. Task queued for later sync.');
             }
         } else {
             showToast('success', 'Task Uploaded', 'Your task has been saved locally (cloud not configured).');
         }
 
+        // 5. Reset form
         document.getElementById('upload-form').reset();
         currentFile = null;
         document.getElementById('upload-placeholder').classList.remove('hidden');
@@ -698,7 +796,7 @@ async function handleTaskUpload(e) {
 }
 
 // ========================================
-// PENDING SYNC QUEUE
+// PENDING SYNC QUEUE (FIXED)
 // ========================================
 
 async function syncPendingTasks() {
@@ -710,7 +808,7 @@ async function syncPendingTasks() {
         return;
     }
 
-    showToast('info', 'Syncing', `Attempting to sync ${pending.length} pending tasks...`);
+    showToast('info', 'Syncing', `Attempting to sync ${pending.length} pending task(s)...`);
     setLoading(true);
 
     const stillPending = [];
@@ -718,14 +816,22 @@ async function syncPendingTasks() {
 
     for (const task of pending) {
         try {
-            const result = await SheetsAPI.submitTask(task);
-            if (result && result.success) {
-                const tasks = DataStore.getTasks();
-                const idx = tasks.findIndex(t => t.id === task.id);
-                if (idx !== -1) {
-                    tasks[idx].synced = true;
-                    DataStore.saveTasks(tasks);
+            let taskToSync = { ...task };
+
+            // Re-upload image if it's base64
+            if (task.screenshot && task.screenshot.startsWith('data:image')) {
+                const uploadResult = await SheetsAPI.uploadImage(
+                    task.screenshot,
+                    `task_${task.username}_${task.id}.jpg`
+                );
+                if (uploadResult && uploadResult.success && uploadResult.url) {
+                    taskToSync.screenshot = uploadResult.url;
                 }
+            }
+
+            const result = await SheetsAPI.submitTask(taskToSync);
+            if (result && result.success) {
+                DataStore.updateTaskSyncStatus(task.id, true);
                 successCount++;
             } else {
                 stillPending.push(task);
@@ -816,8 +922,8 @@ function renderTasksTable() {
             <td class="task-text-cell">${escapeHtml(task.task)}</td>
             <td>
                 ${task.screenshot ? `
-                    <img src="${task.screenshot}" 
-                         class="screenshot-thumb" 
+                    <img src="${task.screenshot}"
+                         class="screenshot-thumb"
                          alt="Screenshot"
                          data-full="${task.screenshot}"
                          data-caption="${escapeHtml(task.task.substring(0, 50))}${task.task.length > 50 ? '...' : ''}"
@@ -853,8 +959,8 @@ function renderMyTasksTable() {
             <td class="task-text-cell">${escapeHtml(task.task)}</td>
             <td>
                 ${task.screenshot ? `
-                    <img src="${task.screenshot}" 
-                         class="screenshot-thumb" 
+                    <img src="${task.screenshot}"
+                         class="screenshot-thumb"
                          alt="Screenshot"
                          data-full="${task.screenshot}"
                          data-caption="${escapeHtml(task.task.substring(0, 50))}${task.task.length > 50 ? '...' : ''}"
@@ -948,7 +1054,7 @@ document.addEventListener('DOMContentLoaded', () => {
             const target = document.getElementById(btn.dataset.target);
             const isPassword = target.type === 'password';
             target.type = isPassword ? 'text' : 'password';
-            btn.innerHTML = isPassword 
+            btn.innerHTML = isPassword
                 ? '<svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"/><circle cx="12" cy="12" r="3"/><line x1="1" y1="1" x2="23" y2="23"/></svg>'
                 : '<svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"/><circle cx="12" cy="12" r="3"/></svg>';
         });
@@ -972,54 +1078,4 @@ document.addEventListener('DOMContentLoaded', () => {
         showToast('info', 'Back Online', 'Attempting to sync pending tasks...');
         syncPendingTasks();
     });
-
-    if (!SheetsAPI.isConfigured()) {
-        seedDemoData();
-    }
 });
-
-// ========================================
-// DEMO DATA (SVG placeholders - no external requests)
-// ========================================
-
-function seedDemoData() {
-    const users = DataStore.getUsers();
-    if (Object.keys(users).length === 0) {
-        DataStore.addUser('alice', 'password123');
-        DataStore.addUser('bob', 'password123');
-        DataStore.addUser('charlie', 'password123');
-
-        const placeholderImg = (text, color) => 
-            `data:image/svg+xml,${encodeURIComponent(`<svg xmlns="http://www.w3.org/2000/svg" width="400" height="300"><rect fill="${color}" width="400" height="300"/><text fill="white" font-family="Arial" font-size="24" x="50%" y="50%" text-anchor="middle" dominant-baseline="middle">${text}</text></svg>`)}`;
-
-        const demoTasks = [
-            {
-                id: generateId(),
-                date: new Date(Date.now() - 86400000).toISOString(),
-                username: 'alice',
-                task: 'Completed the user authentication module with JWT tokens and session management.',
-                screenshot: placeholderImg('Auth Module', '#4f46e5'),
-                synced: false
-            },
-            {
-                id: generateId(),
-                date: new Date(Date.now() - 172800000).toISOString(),
-                username: 'bob',
-                task: 'Designed the database schema for the project management system.',
-                screenshot: placeholderImg('DB Schema', '#10b981'),
-                synced: false
-            },
-            {
-                id: generateId(),
-                date: new Date(Date.now() - 259200000).toISOString(),
-                username: 'charlie',
-                task: 'Set up CI/CD pipeline with GitHub Actions.',
-                screenshot: placeholderImg('CI/CD Pipeline', '#f59e0b'),
-                synced: false
-            }
-        ];
-
-        localStorage.setItem(CONFIG.TASKS_KEY, JSON.stringify(demoTasks));
-        console.log('✅ Demo data seeded! Try: alice / password123');
-    }
-}
