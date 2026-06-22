@@ -1,19 +1,21 @@
 /* ========================================
    SECURE TASK MANAGER - MAIN APPLICATION
+   BUG-FIXED VERSION
    ======================================== */
 
 // ========================================
 // CONFIGURATION
 // ========================================
 const CONFIG = {
-    // Google Apps Script Web App URL (replace with your deployed script URL)
-    // See setup instructions in docs/SETUP.md
-    API_URL: 'https://script.google.com/macros/s/AKfycbwqtMembGr0N-BJpEprQ6PKu7dNqNSsVyy87yQ3VWivzXr8r9nbRdf-JnVL9syGHnwP/exec',
+    // Google Apps Script Web App URL
+    // Replace YOUR_SCRIPT_ID with your actual deployed script ID
+    API_URL: 'https://script.google.com/macros/s/AKfycbwfWfEKbUXyfF25O6GeA_15GL3Q0AdzkgG_dMR6we4Noo57dz1-WpQZ_LfNKFXemEG3/exec',
 
     // LocalStorage keys
     STORAGE_KEY: 'taskhub_session',
     USERS_KEY: 'taskhub_users',
     TASKS_KEY: 'taskhub_tasks',
+    PENDING_KEY: 'taskhub_pending',
 
     // Validation
     MIN_PASSWORD_LENGTH: 8,
@@ -30,10 +32,6 @@ const CONFIG = {
 // UTILITY FUNCTIONS
 // ========================================
 
-/**
- * Hash a password using SHA-256 (client-side hashing for basic security)
- * In production, use bcrypt or Argon2 on the server side.
- */
 async function hashPassword(password) {
     const encoder = new TextEncoder();
     const data = encoder.encode(password + 'taskhub_salt_2024');
@@ -42,16 +40,10 @@ async function hashPassword(password) {
     return hashArray.map(b => b.toString(16).padStart(2, '0')).join('');
 }
 
-/**
- * Generate a unique ID
- */
 function generateId() {
     return Date.now().toString(36) + Math.random().toString(36).substr(2, 9);
 }
 
-/**
- * Format date for display
- */
 function formatDate(dateStr) {
     const date = new Date(dateStr);
     return date.toLocaleDateString('en-US', {
@@ -69,9 +61,6 @@ function formatTime(dateStr) {
     });
 }
 
-/**
- * Show toast notification
- */
 function showToast(type, title, message, duration = 4000) {
     const container = document.getElementById('toast-container');
     const toast = document.createElement('div');
@@ -97,23 +86,16 @@ function showToast(type, title, message, duration = 4000) {
 
     container.appendChild(toast);
 
-    // Auto remove
     setTimeout(() => {
         toast.classList.add('hiding');
         setTimeout(() => toast.remove(), 300);
     }, duration);
 }
 
-/**
- * Show/hide loading overlay
- */
 function setLoading(show) {
     document.getElementById('loading-overlay').classList.toggle('hidden', !show);
 }
 
-/**
- * Retry wrapper for async operations
- */
 async function withRetry(fn, maxRetries = CONFIG.MAX_RETRIES, delay = CONFIG.RETRY_DELAY_MS) {
     let lastError;
     for (let i = 0; i < maxRetries; i++) {
@@ -134,7 +116,6 @@ async function withRetry(fn, maxRetries = CONFIG.MAX_RETRIES, delay = CONFIG.RET
 // ========================================
 
 const DataStore = {
-    // Users
     getUsers() {
         try {
             return JSON.parse(localStorage.getItem(CONFIG.USERS_KEY)) || {};
@@ -172,7 +153,6 @@ const DataStore = {
         return user.passwordHash === hash;
     },
 
-    // Tasks
     getTasks() {
         try {
             return JSON.parse(localStorage.getItem(CONFIG.TASKS_KEY)) || [];
@@ -192,7 +172,29 @@ const DataStore = {
         return tasks;
     },
 
-    // Session
+    getPendingTasks() {
+        try {
+            return JSON.parse(localStorage.getItem(CONFIG.PENDING_KEY)) || [];
+        } catch {
+            return [];
+        }
+    },
+
+    savePendingTasks(tasks) {
+        localStorage.setItem(CONFIG.PENDING_KEY, JSON.stringify(tasks));
+    },
+
+    addPendingTask(task) {
+        const pending = this.getPendingTasks();
+        pending.push(task);
+        this.savePendingTasks(pending);
+    },
+
+    removePendingTask(taskId) {
+        const pending = this.getPendingTasks().filter(t => t.id !== taskId);
+        this.savePendingTasks(pending);
+    },
+
     getSession() {
         try {
             const session = JSON.parse(sessionStorage.getItem(CONFIG.STORAGE_KEY));
@@ -209,7 +211,7 @@ const DataStore = {
         const session = {
             username: username,
             loginAt: new Date().toISOString(),
-            expiresAt: new Date(Date.now() + 24 * 60 * 60 * 1000).toISOString() // 24h
+            expiresAt: new Date(Date.now() + 24 * 60 * 60 * 1000).toISOString()
         };
         sessionStorage.setItem(CONFIG.STORAGE_KEY, JSON.stringify(session));
     },
@@ -218,7 +220,6 @@ const DataStore = {
         sessionStorage.removeItem(CONFIG.STORAGE_KEY);
     },
 
-    // Get all unique usernames
     getAllUsernames() {
         const users = this.getUsers();
         return Object.keys(users);
@@ -231,12 +232,12 @@ const DataStore = {
 
 const SheetsAPI = {
     isConfigured() {
-        return CONFIG.API_URL && CONFIG.API_URL !== 'https://script.google.com/macros/s/AKfycbwqtMembGr0N-BJpEprQ6PKu7dNqNSsVyy87yQ3VWivzXr8r9nbRdf-JnVL9syGHnwP/exec';
+        // Check that URL is set and NOT the placeholder
+        return CONFIG.API_URL && !CONFIG.API_URL.includes('AKfycbwfWfEKbUXyfF25O6GeA_15GL3Q0AdzkgG_dMR6we4Noo57dz1-WpQZ_LfNKFXemEG3');
     },
 
     async submitTask(task) {
         if (!this.isConfigured()) {
-            // Fallback: store locally only
             console.log('Google Sheets API not configured. Storing locally only.');
             return { success: true, local: true };
         }
@@ -244,11 +245,12 @@ const SheetsAPI = {
         return await withRetry(async () => {
             const response = await fetch(CONFIG.API_URL, {
                 method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
+                headers: { 'Content-Type': 'text/plain;charset=utf-8' },
                 body: JSON.stringify({
                     action: 'submitTask',
                     data: task
-                })
+                }),
+                redirect: 'follow'
             });
 
             if (!response.ok) throw new Error(`HTTP ${response.status}`);
@@ -261,7 +263,8 @@ const SheetsAPI = {
 
         return await withRetry(async () => {
             const response = await fetch(`${CONFIG.API_URL}?action=getTasks`, {
-                method: 'GET'
+                method: 'GET',
+                redirect: 'follow'
             });
             if (!response.ok) throw new Error(`HTTP ${response.status}`);
             return await response.json();
@@ -274,12 +277,13 @@ const SheetsAPI = {
         return await withRetry(async () => {
             const response = await fetch(CONFIG.API_URL, {
                 method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
+                headers: { 'Content-Type': 'text/plain;charset=utf-8' },
                 body: JSON.stringify({
                     action: 'uploadImage',
                     image: base64Image,
                     filename: filename
-                })
+                }),
+                redirect: 'follow'
             });
             if (!response.ok) throw new Error(`HTTP ${response.status}`);
             return await response.json();
@@ -367,12 +371,10 @@ const UI = {
     },
 
     showTab(tabId) {
-        // Update sidebar
         document.querySelectorAll('.nav-item').forEach(item => {
             item.classList.toggle('active', item.dataset.tab === tabId);
         });
 
-        // Update content
         document.querySelectorAll('.tab-content').forEach(tab => {
             tab.classList.toggle('active', tab.id === `${tabId}-tab`);
         });
@@ -482,11 +484,44 @@ function handleLogout() {
     showToast('info', 'Logged Out', 'See you next time!');
 }
 
-function enterDashboard(username) {
+async function enterDashboard(username) {
     document.getElementById('current-user').textContent = username;
     UI.showView('dashboard-view');
     UI.showTab('upload');
+
+    // Load cloud data first, then refresh
+    if (SheetsAPI.isConfigured()) {
+        try {
+            setLoading(true);
+            const result = await SheetsAPI.fetchTasks();
+            if (result && result.success && result.tasks) {
+                // Merge cloud tasks with local (cloud wins on conflict by date)
+                const localTasks = DataStore.getTasks();
+                const cloudTasks = result.tasks;
+                const merged = mergeTasks(localTasks, cloudTasks);
+                DataStore.saveTasks(merged);
+                showToast('success', 'Synced', `Loaded ${cloudTasks.length} tasks from cloud`);
+            }
+        } catch (err) {
+            console.warn('Could not fetch cloud tasks:', err);
+            showToast('warning', 'Offline Mode', 'Using local data only');
+        } finally {
+            setLoading(false);
+        }
+    }
+
     refreshAllData();
+}
+
+function mergeTasks(local, cloud) {
+    const map = new Map();
+    [...local, ...cloud].forEach(task => {
+        const existing = map.get(task.id);
+        if (!existing || new Date(task.date) > new Date(existing.date)) {
+            map.set(task.id, task);
+        }
+    });
+    return Array.from(map.values()).sort((a, b) => new Date(b.date) - new Date(a.date));
 }
 
 // ========================================
@@ -504,17 +539,14 @@ function setupFileUpload() {
     const fileName = document.getElementById('file-name');
     const removeBtn = document.getElementById('remove-file');
 
-    // Click to upload
     dropZone.addEventListener('click', () => fileInput.click());
 
-    // File selected
     fileInput.addEventListener('change', (e) => {
         if (e.target.files.length > 0) {
             handleFileSelect(e.target.files[0]);
         }
     });
 
-    // Drag & drop
     ['dragenter', 'dragover', 'dragleave', 'drop'].forEach(eventName => {
         dropZone.addEventListener(eventName, (e) => {
             e.preventDefault();
@@ -537,7 +569,6 @@ function setupFileUpload() {
         }
     });
 
-    // Remove file
     removeBtn.addEventListener('click', (e) => {
         e.stopPropagation();
         currentFile = null;
@@ -591,25 +622,34 @@ async function handleTaskUpload(e) {
 
     setLoading(true);
 
+    let screenshotUrl = null;
+    let cloudUploadSuccess = false;
+
     try {
         // Compress image
         const base64Original = await fileToBase64(currentFile);
         const base64Compressed = await compressImage(base64Original);
 
-        // Try to upload to Google Drive via API
-        let screenshotUrl = base64Compressed;
+        // Try to upload image to Google Drive
         if (SheetsAPI.isConfigured()) {
             try {
                 const uploadResult = await SheetsAPI.uploadImage(
                     base64Compressed,
                     `task_${session.username}_${Date.now()}.jpg`
                 );
-                if (uploadResult && uploadResult.url) {
+                if (uploadResult && uploadResult.success && uploadResult.url) {
                     screenshotUrl = uploadResult.url;
+                    cloudUploadSuccess = true;
+                } else {
+                    screenshotUrl = base64Compressed;
+                    console.warn('Image upload returned no URL, using base64');
                 }
             } catch (err) {
+                screenshotUrl = base64Compressed;
                 console.warn('Image upload to cloud failed, using base64:', err);
             }
+        } else {
+            screenshotUrl = base64Compressed;
         }
 
         const task = {
@@ -618,23 +658,39 @@ async function handleTaskUpload(e) {
             username: session.username,
             task: taskText,
             screenshot: screenshotUrl,
-            synced: SheetsAPI.isConfigured()
+            synced: false
         };
 
-        // Save locally
+        // Save locally first
         DataStore.addTask(task);
 
         // Try to sync with Google Sheets
         if (SheetsAPI.isConfigured()) {
             try {
-                await SheetsAPI.submitTask(task);
-                showToast('success', 'Task Uploaded', 'Your task has been saved and synced!');
+                const result = await SheetsAPI.submitTask(task);
+                if (result && result.success) {
+                    task.synced = true;
+                    // Update local task as synced
+                    const tasks = DataStore.getTasks();
+                    const idx = tasks.findIndex(t => t.id === task.id);
+                    if (idx !== -1) {
+                        tasks[idx].synced = true;
+                        DataStore.saveTasks(tasks);
+                    }
+                    showToast('success', 'Task Uploaded', 'Your task has been saved and synced to the cloud!');
+                    // Remove from pending if it was there
+                    DataStore.removePendingTask(task.id);
+                } else {
+                    throw new Error(result.error || 'Unknown server error');
+                }
             } catch (err) {
-                console.warn('Sync failed, stored locally:', err);
-                showToast('warning', 'Saved Locally', 'Task saved locally. Will sync when connection is restored.');
+                console.error('Cloud sync failed:', err);
+                task.synced = false;
+                DataStore.addPendingTask(task);
+                showToast('warning', 'Saved Locally', 'Cloud sync failed. Task queued for later sync. Error: ' + err.message);
             }
         } else {
-            showToast('success', 'Task Uploaded', 'Your task has been saved successfully!');
+            showToast('success', 'Task Uploaded', 'Your task has been saved locally (cloud not configured).');
         }
 
         // Reset form
@@ -652,6 +708,59 @@ async function handleTaskUpload(e) {
     } finally {
         setLoading(false);
     }
+}
+
+// ========================================
+// PENDING SYNC QUEUE
+// ========================================
+
+async function syncPendingTasks() {
+    const pending = DataStore.getPendingTasks();
+    if (pending.length === 0) return;
+
+    if (!SheetsAPI.isConfigured()) {
+        console.log('API not configured, skipping pending sync');
+        return;
+    }
+
+    showToast('info', 'Syncing', `Attempting to sync ${pending.length} pending tasks...`);
+    setLoading(true);
+
+    const stillPending = [];
+    let successCount = 0;
+
+    for (const task of pending) {
+        try {
+            const result = await SheetsAPI.submitTask(task);
+            if (result && result.success) {
+                // Mark as synced in local storage
+                const tasks = DataStore.getTasks();
+                const idx = tasks.findIndex(t => t.id === task.id);
+                if (idx !== -1) {
+                    tasks[idx].synced = true;
+                    DataStore.saveTasks(tasks);
+                }
+                successCount++;
+            } else {
+                stillPending.push(task);
+            }
+        } catch (err) {
+            console.warn('Failed to sync task:', task.id, err);
+            stillPending.push(task);
+        }
+    }
+
+    DataStore.savePendingTasks(stillPending);
+    setLoading(false);
+
+    if (successCount > 0) {
+        showToast('success', 'Sync Complete', `${successCount} task(s) synced to cloud`);
+    }
+    if (stillPending.length > 0) {
+        showToast('warning', 'Sync Pending', `${stillPending.length} task(s) still waiting`);
+    }
+
+    refreshAllData();
 }
 
 // ========================================
@@ -887,8 +996,16 @@ document.addEventListener('DOMContentLoaded', () => {
         if (e.key === 'Escape') closeLightbox();
     });
 
-    // Demo data (for first-time users)
-    seedDemoData();
+    // Sync pending tasks on load and when coming back online
+    window.addEventListener('online', () => {
+        showToast('info', 'Back Online', 'Attempting to sync pending tasks...');
+        syncPendingTasks();
+    });
+
+    // Only seed demo data if no users exist AND cloud is not configured
+    if (!SheetsAPI.isConfigured()) {
+        seedDemoData();
+    }
 });
 
 // ========================================
@@ -898,49 +1015,38 @@ document.addEventListener('DOMContentLoaded', () => {
 function seedDemoData() {
     const users = DataStore.getUsers();
     if (Object.keys(users).length === 0) {
-        // Create demo accounts
         DataStore.addUser('alice', 'password123');
         DataStore.addUser('bob', 'password123');
         DataStore.addUser('charlie', 'password123');
 
-        // Create demo tasks
         const demoTasks = [
             {
                 id: generateId(),
                 date: new Date(Date.now() - 86400000).toISOString(),
                 username: 'alice',
-                task: 'Completed the user authentication module with JWT tokens and session management. Implemented password hashing using bcrypt.',
-                screenshot: 'https://via.placeholder.com/400x300/4f46e5/ffffff?text=Auth+Module+Screenshot',
+                task: 'Completed the user authentication module with JWT tokens and session management.',
+                screenshot: 'https://via.placeholder.com/400x300/4f46e5/ffffff?text=Auth+Module',
                 synced: false
             },
             {
                 id: generateId(),
                 date: new Date(Date.now() - 172800000).toISOString(),
                 username: 'bob',
-                task: 'Designed the database schema for the project management system. Created ER diagrams and normalized tables.',
-                screenshot: 'https://via.placeholder.com/400x300/10b981/ffffff?text=DB+Schema+Design',
+                task: 'Designed the database schema for the project management system.',
+                screenshot: 'https://via.placeholder.com/400x300/10b981/ffffff?text=DB+Schema',
                 synced: false
             },
             {
                 id: generateId(),
                 date: new Date(Date.now() - 259200000).toISOString(),
                 username: 'charlie',
-                task: 'Set up CI/CD pipeline with GitHub Actions. Automated testing and deployment workflows configured.',
-                screenshot: 'https://via.placeholder.com/400x300/f59e0b/ffffff?text=CI+CD+Pipeline',
-                synced: false
-            },
-            {
-                id: generateId(),
-                date: new Date(Date.now() - 43200000).toISOString(),
-                username: 'alice',
-                task: 'Fixed responsive layout issues on mobile devices. Adjusted breakpoints and flexbox containers.',
-                screenshot: 'https://via.placeholder.com/400x300/ef4444/ffffff?text=Mobile+Fixes',
+                task: 'Set up CI/CD pipeline with GitHub Actions.',
+                screenshot: 'https://via.placeholder.com/400x300/f59e0b/ffffff?text=CI+CD',
                 synced: false
             }
         ];
 
         localStorage.setItem(CONFIG.TASKS_KEY, JSON.stringify(demoTasks));
-
-        console.log('✅ Demo data seeded! Try logging in with: alice / password123');
+        console.log('✅ Demo data seeded! Try: alice / password123');
     }
 }
