@@ -7,8 +7,7 @@
 // CONFIGURATION
 // ========================================
 const CONFIG = {
-    // Google Apps Script Web App URL
-    // Replace YOUR_SCRIPT_ID with your actual deployed script ID
+    // Your actual Google Apps Script Web App URL
     API_URL: 'https://script.google.com/macros/s/AKfycbwfWfEKbUXyfF25O6GeA_15GL3Q0AdzkgG_dMR6we4Noo57dz1-WpQZ_LfNKFXemEG3/exec',
 
     // LocalStorage keys
@@ -232,13 +231,11 @@ const DataStore = {
 
 const SheetsAPI = {
     isConfigured() {
-        // Check that URL is set and NOT the placeholder
-        return CONFIG.API_URL && !CONFIG.API_URL.includes('AKfycbwfWfEKbUXyfF25O6GeA_15GL3Q0AdzkgG_dMR6we4Noo57dz1-WpQZ_LfNKFXemEG3');
+        return CONFIG.API_URL && CONFIG.API_URL.length > 50;
     },
 
     async submitTask(task) {
         if (!this.isConfigured()) {
-            console.log('Google Sheets API not configured. Storing locally only.');
             return { success: true, local: true };
         }
 
@@ -489,13 +486,11 @@ async function enterDashboard(username) {
     UI.showView('dashboard-view');
     UI.showTab('upload');
 
-    // Load cloud data first, then refresh
     if (SheetsAPI.isConfigured()) {
         try {
             setLoading(true);
             const result = await SheetsAPI.fetchTasks();
             if (result && result.success && result.tasks) {
-                // Merge cloud tasks with local (cloud wins on conflict by date)
                 const localTasks = DataStore.getTasks();
                 const cloudTasks = result.tasks;
                 const merged = mergeTasks(localTasks, cloudTasks);
@@ -626,11 +621,9 @@ async function handleTaskUpload(e) {
     let cloudUploadSuccess = false;
 
     try {
-        // Compress image
         const base64Original = await fileToBase64(currentFile);
         const base64Compressed = await compressImage(base64Original);
 
-        // Try to upload image to Google Drive
         if (SheetsAPI.isConfigured()) {
             try {
                 const uploadResult = await SheetsAPI.uploadImage(
@@ -642,7 +635,6 @@ async function handleTaskUpload(e) {
                     cloudUploadSuccess = true;
                 } else {
                     screenshotUrl = base64Compressed;
-                    console.warn('Image upload returned no URL, using base64');
                 }
             } catch (err) {
                 screenshotUrl = base64Compressed;
@@ -661,16 +653,13 @@ async function handleTaskUpload(e) {
             synced: false
         };
 
-        // Save locally first
         DataStore.addTask(task);
 
-        // Try to sync with Google Sheets
         if (SheetsAPI.isConfigured()) {
             try {
                 const result = await SheetsAPI.submitTask(task);
                 if (result && result.success) {
                     task.synced = true;
-                    // Update local task as synced
                     const tasks = DataStore.getTasks();
                     const idx = tasks.findIndex(t => t.id === task.id);
                     if (idx !== -1) {
@@ -678,7 +667,6 @@ async function handleTaskUpload(e) {
                         DataStore.saveTasks(tasks);
                     }
                     showToast('success', 'Task Uploaded', 'Your task has been saved and synced to the cloud!');
-                    // Remove from pending if it was there
                     DataStore.removePendingTask(task.id);
                 } else {
                     throw new Error(result.error || 'Unknown server error');
@@ -693,7 +681,6 @@ async function handleTaskUpload(e) {
             showToast('success', 'Task Uploaded', 'Your task has been saved locally (cloud not configured).');
         }
 
-        // Reset form
         document.getElementById('upload-form').reset();
         currentFile = null;
         document.getElementById('upload-placeholder').classList.remove('hidden');
@@ -733,7 +720,6 @@ async function syncPendingTasks() {
         try {
             const result = await SheetsAPI.submitTask(task);
             if (result && result.success) {
-                // Mark as synced in local storage
                 const tasks = DataStore.getTasks();
                 const idx = tasks.findIndex(t => t.id === task.id);
                 if (idx !== -1) {
@@ -911,7 +897,6 @@ function closeLightbox() {
 // ========================================
 
 document.addEventListener('DOMContentLoaded', () => {
-    // Check existing session
     const session = DataStore.getSession();
     if (session) {
         enterDashboard(session.username);
@@ -919,13 +904,9 @@ document.addEventListener('DOMContentLoaded', () => {
         UI.showView('login-view');
     }
 
-    // Login form
     document.getElementById('login-form').addEventListener('submit', handleLogin);
-
-    // Register form
     document.getElementById('register-form').addEventListener('submit', handleRegister);
 
-    // Toggle views
     document.getElementById('show-register').addEventListener('click', (e) => {
         e.preventDefault();
         UI.showView('register-view');
@@ -940,10 +921,8 @@ document.addEventListener('DOMContentLoaded', () => {
         UI.clearErrors('login-form');
     });
 
-    // Logout
     document.getElementById('logout-btn').addEventListener('click', handleLogout);
 
-    // Sidebar navigation
     document.querySelectorAll('.nav-item').forEach(item => {
         item.addEventListener('click', () => {
             UI.showTab(item.dataset.tab);
@@ -952,13 +931,9 @@ document.addEventListener('DOMContentLoaded', () => {
         });
     });
 
-    // Upload form
     document.getElementById('upload-form').addEventListener('submit', handleTaskUpload);
-
-    // File upload setup
     setupFileUpload();
 
-    // Character counter
     document.getElementById('task-text').addEventListener('input', (e) => {
         const count = e.target.value.length;
         document.getElementById('char-count').textContent = count;
@@ -968,7 +943,6 @@ document.addEventListener('DOMContentLoaded', () => {
         }
     });
 
-    // Password visibility toggle
     document.querySelectorAll('.toggle-password').forEach(btn => {
         btn.addEventListener('click', () => {
             const target = document.getElementById(btn.dataset.target);
@@ -980,7 +954,6 @@ document.addEventListener('DOMContentLoaded', () => {
         });
     });
 
-    // Filters
     document.getElementById('filter-date').addEventListener('change', renderTasksTable);
     document.getElementById('filter-user').addEventListener('change', renderTasksTable);
     document.getElementById('clear-filters').addEventListener('click', () => {
@@ -989,27 +962,24 @@ document.addEventListener('DOMContentLoaded', () => {
         renderTasksTable();
     });
 
-    // Lightbox
     document.getElementById('lightbox-close').addEventListener('click', closeLightbox);
     document.querySelector('.lightbox-overlay').addEventListener('click', closeLightbox);
     document.addEventListener('keydown', (e) => {
         if (e.key === 'Escape') closeLightbox();
     });
 
-    // Sync pending tasks on load and when coming back online
     window.addEventListener('online', () => {
         showToast('info', 'Back Online', 'Attempting to sync pending tasks...');
         syncPendingTasks();
     });
 
-    // Only seed demo data if no users exist AND cloud is not configured
     if (!SheetsAPI.isConfigured()) {
         seedDemoData();
     }
 });
 
 // ========================================
-// DEMO DATA
+// DEMO DATA (SVG placeholders - no external requests)
 // ========================================
 
 function seedDemoData() {
@@ -1019,13 +989,16 @@ function seedDemoData() {
         DataStore.addUser('bob', 'password123');
         DataStore.addUser('charlie', 'password123');
 
+        const placeholderImg = (text, color) => 
+            `data:image/svg+xml,${encodeURIComponent(`<svg xmlns="http://www.w3.org/2000/svg" width="400" height="300"><rect fill="${color}" width="400" height="300"/><text fill="white" font-family="Arial" font-size="24" x="50%" y="50%" text-anchor="middle" dominant-baseline="middle">${text}</text></svg>`)}`;
+
         const demoTasks = [
             {
                 id: generateId(),
                 date: new Date(Date.now() - 86400000).toISOString(),
                 username: 'alice',
                 task: 'Completed the user authentication module with JWT tokens and session management.',
-                screenshot: 'https://via.placeholder.com/400x300/4f46e5/ffffff?text=Auth+Module',
+                screenshot: placeholderImg('Auth Module', '#4f46e5'),
                 synced: false
             },
             {
@@ -1033,7 +1006,7 @@ function seedDemoData() {
                 date: new Date(Date.now() - 172800000).toISOString(),
                 username: 'bob',
                 task: 'Designed the database schema for the project management system.',
-                screenshot: 'https://via.placeholder.com/400x300/10b981/ffffff?text=DB+Schema',
+                screenshot: placeholderImg('DB Schema', '#10b981'),
                 synced: false
             },
             {
@@ -1041,7 +1014,7 @@ function seedDemoData() {
                 date: new Date(Date.now() - 259200000).toISOString(),
                 username: 'charlie',
                 task: 'Set up CI/CD pipeline with GitHub Actions.',
-                screenshot: 'https://via.placeholder.com/400x300/f59e0b/ffffff?text=CI+CD',
+                screenshot: placeholderImg('CI/CD Pipeline', '#f59e0b'),
                 synced: false
             }
         ];
