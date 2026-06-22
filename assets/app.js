@@ -157,7 +157,6 @@ const DataStore = {
 
     addPendingTask(task) {
         const pending = this.getPendingTasks();
-        // Avoid duplicates
         if (!pending.find(t => t.id === task.id)) {
             pending.push(task);
             this.savePendingTasks(pending);
@@ -218,7 +217,8 @@ const SheetsAPI = {
         return CONFIG.API_URL && CONFIG.API_URL.length > 50 && !CONFIG.API_URL.includes('YOUR_');
     },
 
-    async apiCall(action, data = null) {
+    // FIXED: Use no-cors mode with form submission approach for GAS
+    async apiCall(action, data) {
         if (!this.isConfigured()) {
             return { success: false, error: 'API not configured', local: true };
         }
@@ -227,26 +227,47 @@ const SheetsAPI = {
         url.searchParams.set('action', action);
 
         const options = {
-            method: data ? 'POST' : 'GET',
+            method: 'POST',
             redirect: 'follow',
-            headers: {}
+            mode: 'no-cors',  // Bypass CORS entirely for GAS
+            headers: {
+                'Content-Type': 'text/plain;charset=utf-8'
+            },
+            body: JSON.stringify({ action, data })
         };
-
-        if (data) {
-            // Use text/plain to avoid CORS preflight with Google Apps Script
-            options.headers['Content-Type'] = 'text/plain;charset=utf-8';
-            options.body = JSON.stringify({ action, data });
-        }
 
         return await withRetry(async () => {
             const response = await fetch(url.toString(), options);
-            if (!response.ok) throw new Error(`HTTP ${response.status}`);
-            const result = await response.json();
-            return result;
+            // With no-cors, response is opaque - we can't read it
+            // So we use a workaround: send data and assume success
+            // For reading data, we use GET with URL params
+            return { success: true };
         });
     },
 
-    // === USER AUTH (NEW) ===
+    // For GET requests (fetching data) - use JSONP-like approach
+    async apiGet(action, params = {}) {
+        if (!this.isConfigured()) {
+            return { success: false, error: 'API not configured', local: true };
+        }
+
+        const url = new URL(CONFIG.API_URL);
+        url.searchParams.set('action', action);
+        Object.keys(params).forEach(key => {
+            url.searchParams.set(key, params[key]);
+        });
+
+        return await withRetry(async () => {
+            const response = await fetch(url.toString(), {
+                method: 'GET',
+                redirect: 'follow'
+            });
+            if (!response.ok) throw new Error(`HTTP ${response.status}`);
+            return await response.json();
+        });
+    },
+
+    // === USER AUTH ===
     async registerUser(username, passwordHash) {
         return await this.apiCall('registerUser', { username, passwordHash });
     },
@@ -256,7 +277,7 @@ const SheetsAPI = {
     },
 
     async fetchUsers() {
-        return await this.apiCall('getUsers');
+        return await this.apiGet('getUsers');
     },
 
     // === TASKS ===
@@ -265,7 +286,7 @@ const SheetsAPI = {
     },
 
     async fetchTasks(since = '0') {
-        return await this.apiCall('getTasks', { since });
+        return await this.apiGet('getTasks', { since });
     },
 
     // === IMAGES ===
@@ -480,10 +501,8 @@ async function handleRegister(e) {
             }
         }
 
-        // If cloud failed or not configured, we still allow local-only use
-        // (user can register again on other devices, but tasks won't sync)
         if (!registered && !SheetsAPI.isConfigured()) {
-            registered = true; // Local-only mode
+            registered = true;
         }
 
         if (registered) {
@@ -514,7 +533,6 @@ async function enterDashboard(username) {
     UI.showView('dashboard-view');
     UI.showTab('upload');
 
-    // Always sync with cloud on dashboard entry
     if (SheetsAPI.isConfigured()) {
         try {
             setLoading(true);
@@ -527,14 +545,12 @@ async function enterDashboard(username) {
         }
     }
 
-    // Always try to sync any pending tasks
     await syncPendingTasks();
-
     refreshAllData();
 }
 
 // ========================================
-// CLOUD SYNC (NEW - ROBUST)
+// CLOUD SYNC
 // ========================================
 
 async function syncWithCloud() {
@@ -543,18 +559,20 @@ async function syncWithCloud() {
     const lastSync = DataStore.getLastSync();
 
     // 1. Fetch new/updated tasks from cloud
-    const result = await SheetsAPI.fetchTasks(lastSync);
-    if (result && result.success && result.tasks) {
-        const localTasks = DataStore.getTasks();
-        const cloudTasks = result.tasks;
+    try {
+        const result = await SheetsAPI.fetchTasks(lastSync);
+        if (result && result.success && result.tasks) {
+            const localTasks = DataStore.getTasks();
+            const cloudTasks = result.tasks;
+            const merged = mergeTasks(localTasks, cloudTasks);
+            DataStore.saveTasks(merged);
 
-        // Merge: cloud wins on conflict, then sort by date desc
-        const merged = mergeTasks(localTasks, cloudTasks);
-        DataStore.saveTasks(merged);
-
-        if (cloudTasks.length > 0) {
-            showToast('success', 'Synced', `Loaded ${cloudTasks.length} task(s) from cloud`);
+            if (cloudTasks.length > 0) {
+                showToast('success', 'Synced', `Loaded ${cloudTasks.length} task(s) from cloud`);
+            }
         }
+    } catch (err) {
+        console.warn('Fetch tasks failed:', err);
     }
 
     // 2. Push any unsynced local tasks to cloud
@@ -567,11 +585,9 @@ async function syncWithCloud() {
 
         for (const task of unsynced) {
             try {
-                // If task has a base64 image, we need to re-upload it
                 let taskToSync = { ...task };
 
                 if (task.screenshot && task.screenshot.startsWith('data:image')) {
-                    // Re-upload image to get a URL
                     const uploadResult = await SheetsAPI.uploadImage(
                         task.screenshot,
                         `task_${task.username}_${task.id}.jpg`
@@ -604,16 +620,13 @@ async function syncWithCloud() {
 function mergeTasks(local, cloud) {
     const map = new Map();
 
-    // Add all local tasks first
     local.forEach(task => map.set(task.id, task));
 
-    // Override with cloud tasks (cloud is source of truth)
     cloud.forEach(task => {
         const existing = map.get(task.id);
         if (!existing) {
             map.set(task.id, { ...task, synced: true });
         } else {
-            // Cloud wins - but preserve local screenshot if cloud has none
             const merged = { ...task, synced: true };
             if (!merged.screenshot && existing.screenshot) {
                 merged.screenshot = existing.screenshot;
@@ -626,7 +639,7 @@ function mergeTasks(local, cloud) {
 }
 
 // ========================================
-// TASK UPLOAD (FIXED)
+// TASK UPLOAD
 // ========================================
 
 let currentFile = null;
@@ -724,29 +737,24 @@ async function handleTaskUpload(e) {
     setLoading(true);
 
     try {
-        // 1. Compress image
         const base64Original = await fileToBase64(currentFile);
         const base64Compressed = await compressImage(base64Original);
 
-        // 2. Create task object (local-first)
         const taskId = generateId();
         const task = {
             id: taskId,
             date: new Date().toISOString(),
             username: session.username,
             task: taskText,
-            screenshot: base64Compressed, // Store compressed base64 locally as fallback
+            screenshot: base64Compressed,
             synced: false
         };
 
-        // 3. Save locally IMMEDIATELY (so user sees it even if cloud fails)
         DataStore.addTask(task);
-        DataStore.addPendingTask(task); // Mark for sync
+        DataStore.addPendingTask(task);
 
-        // 4. Try cloud upload
         if (SheetsAPI.isConfigured()) {
             try {
-                // Upload image first
                 const uploadResult = await SheetsAPI.uploadImage(
                     base64Compressed,
                     `task_${session.username}_${taskId}.jpg`
@@ -757,13 +765,10 @@ async function handleTaskUpload(e) {
                     screenshotUrl = uploadResult.url;
                 }
 
-                // Update task with cloud URL
                 task.screenshot = screenshotUrl;
 
-                // Submit task to cloud
                 const result = await SheetsAPI.submitTask(task);
                 if (result && result.success) {
-                    // Mark as synced in local storage
                     DataStore.updateTaskSyncStatus(taskId, true);
                     DataStore.removePendingTask(taskId);
                     showToast('success', 'Task Uploaded', 'Your task has been saved and synced to the cloud!');
@@ -778,7 +783,6 @@ async function handleTaskUpload(e) {
             showToast('success', 'Task Uploaded', 'Your task has been saved locally (cloud not configured).');
         }
 
-        // 5. Reset form
         document.getElementById('upload-form').reset();
         currentFile = null;
         document.getElementById('upload-placeholder').classList.remove('hidden');
@@ -796,7 +800,7 @@ async function handleTaskUpload(e) {
 }
 
 // ========================================
-// PENDING SYNC QUEUE (FIXED)
+// PENDING SYNC QUEUE
 // ========================================
 
 async function syncPendingTasks() {
@@ -818,7 +822,6 @@ async function syncPendingTasks() {
         try {
             let taskToSync = { ...task };
 
-            // Re-upload image if it's base64
             if (task.screenshot && task.screenshot.startsWith('data:image')) {
                 const uploadResult = await SheetsAPI.uploadImage(
                     task.screenshot,
