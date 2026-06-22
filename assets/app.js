@@ -8,7 +8,7 @@
 const CONFIG = {
     // Google Apps Script Web App URL (replace with your deployed script URL)
     // See setup instructions in docs/SETUP.md
-    API_URL: 'YOUR_GOOGLE_APPS_SCRIPT_URL_HERE',
+    API_URL: 'https://script.google.com/macros/s/AKfycbxu8buy9GRQTE-SiqcbwBfDIwSdAZxXEz9ovKNWQeDPFLm2Tjklq95KyaPG--OHpE5I/exec',
 
     // LocalStorage keys
     STORAGE_KEY: 'taskhub_session',
