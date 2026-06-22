@@ -11,6 +11,14 @@ const DRIVE_FOLDER_NAME = 'TaskHub Screenshots';
  * Main entry point for web app requests
  */
 function doGet(e) {
+    // Handle undefined event object (direct URL access without params)
+    if (!e || !e.parameter) {
+        return jsonResponse({ 
+            status: 'ok', 
+            message: 'TaskHub API is running. Use POST for task submission or ?action=getTasks for fetching tasks.'
+        });
+    }
+
     const action = e.parameter.action;
 
     try {
@@ -18,26 +26,41 @@ function doGet(e) {
             return jsonResponse(getTasks());
         }
 
-        return jsonResponse({ error: 'Unknown action' }, 400);
+        return jsonResponse({ error: 'Unknown action. Use ?action=getTasks' }, 400);
     } catch (err) {
         return jsonResponse({ error: err.toString() }, 500);
     }
 }
 
 function doPost(e) {
+    // Validate request has postData
+    if (!e || !e.postData || !e.postData.contents) {
+        return jsonResponse({ error: 'Missing request body. Send JSON payload.' }, 400);
+    }
+
     try {
         const data = JSON.parse(e.postData.contents);
         const action = data.action;
 
+        if (!action) {
+            return jsonResponse({ error: 'Missing action field in request body' }, 400);
+        }
+
         if (action === 'submitTask') {
+            if (!data.data) {
+                return jsonResponse({ error: 'Missing data field for submitTask' }, 400);
+            }
             return jsonResponse(submitTask(data.data));
         }
 
         if (action === 'uploadImage') {
+            if (!data.image || !data.filename) {
+                return jsonResponse({ error: 'Missing image or filename for uploadImage' }, 400);
+            }
             return jsonResponse(uploadImage(data.image, data.filename));
         }
 
-        return jsonResponse({ error: 'Unknown action' }, 400);
+        return jsonResponse({ error: 'Unknown action. Use submitTask or uploadImage' }, 400);
     } catch (err) {
         return jsonResponse({ error: err.toString() }, 500);
     }
